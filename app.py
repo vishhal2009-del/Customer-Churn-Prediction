@@ -1,758 +1,946 @@
 
 import os
+import urllib.request
+import json
 import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import streamlit as st
-import plotly.graph_objects as go
+import plotly.express as px
 
 
-# =====================================================
-# 1. PAGE CONFIGURATION
-# =====================================================
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="Customer Churn Prediction",
-    page_icon="📊",
     layout="wide"
 )
 
-
-# =====================================================
-# 2. LOAD MODEL AND PREPROCESSING FILES
-# =====================================================
-
-@st.cache_resource
-def load_files():
-
-    model = tf.keras.models.load_model(
-        "model/churn_model.keras"
-    )
-
-    scaler = joblib.load(
-        "dataset/scaler.pkl"
-    )
-
-    feature_columns = joblib.load(
-        "dataset/feature_columns.pkl"
-    )
-
-    csv_path = "dataset/Telco-Customer-Churn.csv"
-
-    if not os.path.exists(csv_path):
-        csv_path = "dataset/WA_Fn-UseC_-Telco-Customer-Churn.csv"
-
-    original_data = pd.read_csv(csv_path)
-
-    original_data["TotalCharges"] = pd.to_numeric(
-        original_data["TotalCharges"],
-        errors="coerce"
-    ).fillna(0)
-
-    original_data = original_data.drop(
-        columns=["customerID", "Churn"]
-    )
-
-    return model, scaler, feature_columns, original_data
-
-
-try:
-
-    model, scaler, feature_columns, original_data = load_files()
-
-except Exception as e:
-
-    st.error(f"Error loading model or dataset: {e}")
-    st.stop()
-
-
-# =====================================================
-# 3. APPLICATION HEADER
-# =====================================================
-
-st.title("📊 Customer Churn Prediction System")
-
-st.markdown(
-    """
-    ### Deep Neural Network Based Prediction
-
-    This application predicts whether a customer
-    is likely to leave the company using a trained
-    Deep Neural Network.
-    """
-)
-
+st.title("Customer Churn Prediction System")
 st.divider()
 
 
-# =====================================================
-# 4. CUSTOMER INFORMATION FORM
-# =====================================================
+# ============================================================
+# PROJECT PATHS
+# ============================================================
 
-with st.form("customer_form"):
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    st.header("👤 Personal Information")
+MODEL_PATHS = [
+    os.path.join(BASE_DIR, "model", "churn_model.keras"),
+    os.path.join(BASE_DIR, "models", "churn_model.keras")
+]
 
-    col1, col2, col3 = st.columns(3)
+SCALER_PATH = os.path.join(BASE_DIR, "dataset", "scaler.pkl")
+FEATURE_PATH = os.path.join(BASE_DIR, "dataset", "feature_columns.pkl")
+
+DATASET_PATHS = [
+    os.path.join(BASE_DIR, "dataset", "WA_Fn-UseC_-Telco-Customer-Churn.csv"),
+    os.path.join(BASE_DIR, "dataset", "Telco-Customer-Churn.csv")
+]
+
+NUMERIC_COLUMNS = [
+    "tenure",
+    "MonthlyCharges",
+    "TotalCharges"
+]
+
+REQUIRED_COLUMNS = [
+    "gender",
+    "SeniorCitizen",
+    "Partner",
+    "Dependents",
+    "tenure",
+    "PhoneService",
+    "MultipleLines",
+    "InternetService",
+    "OnlineSecurity",
+    "OnlineBackup",
+    "DeviceProtection",
+    "TechSupport",
+    "StreamingTV",
+    "StreamingMovies",
+    "Contract",
+    "PaperlessBilling",
+    "PaymentMethod",
+    "MonthlyCharges",
+    "TotalCharges"
+]
+
+
+# ============================================================
+# LOAD DATASET
+# ============================================================
+
+@st.cache_data
+def load_dataset():
+
+    for path in DATASET_PATHS:
+
+        if os.path.exists(path):
+
+            df = pd.read_csv(path)
+
+            df["TotalCharges"] = pd.to_numeric(
+                df["TotalCharges"],
+                errors="coerce"
+            )
+
+            df = df.dropna(subset=["TotalCharges"])
+
+            return df
+
+    return None
+
+
+# ============================================================
+# LOAD MODEL AND PREPROCESSING FILES
+# ============================================================
+
+@st.cache_resource
+def load_model_and_preprocessing():
+
+    model_path = next(
+        (path for path in MODEL_PATHS if os.path.exists(path)),
+        None
+    )
+
+    if model_path is None:
+        raise FileNotFoundError(
+            "Model file not found. Check model/churn_model.keras "
+            "or models/churn_model.keras."
+        )
+
+    if not os.path.exists(SCALER_PATH):
+        raise FileNotFoundError("dataset/scaler.pkl was not found.")
+
+    if not os.path.exists(FEATURE_PATH):
+        raise FileNotFoundError(
+            "dataset/feature_columns.pkl was not found."
+        )
+
+    model = tf.keras.models.load_model(model_path)
+
+    scaler = joblib.load(SCALER_PATH)
+
+    feature_columns = joblib.load(FEATURE_PATH)
+
+    return model, scaler, list(feature_columns)
+
+
+# ============================================================
+# USD TO INR EXCHANGE RATE
+# ============================================================
+
+FALLBACK_RATE = 92.68
+
+
+@st.cache_data(ttl=3600)
+def get_exchange_rate():
+
+    try:
+
+        url = "https://open.er-api.com/v6/latest/USD"
+
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "CustomerChurnPrediction/1.0"}
+        )
+
+        with urllib.request.urlopen(request, timeout=10) as response:
+
+            data = json.loads(response.read().decode("utf-8"))
+
+        rate = float(data["rates"]["INR"])
+
+        if rate <= 0:
+            raise ValueError("Invalid exchange rate.")
+
+        return rate, True
+
+    except Exception:
+
+        return FALLBACK_RATE, False
+
+
+USD_INR_RATE, LIVE_RATE_AVAILABLE = get_exchange_rate()
+
+
+# ============================================================
+# CURRENCY CONVERSION
+# ============================================================
+
+def inr_to_usd(amount):
+
+    return float(amount) / USD_INR_RATE
+
+
+def usd_to_inr(amount):
+
+    return float(amount) * USD_INR_RATE
+
+
+# ============================================================
+# PREPROCESSING FUNCTION
+# ============================================================
+
+def prepare_model_input(
+    customer_data,
+    original_data,
+    scaler,
+    feature_columns
+):
+
+    base_features = original_data.drop(
+        columns=["customerID", "Churn"],
+        errors="ignore"
+    ).copy()
+
+    base_features["TotalCharges"] = pd.to_numeric(
+        base_features["TotalCharges"],
+        errors="coerce"
+    )
+
+    base_features = base_features.dropna(
+        subset=["TotalCharges"]
+    )
+
+    combined_data = pd.concat(
+        [base_features, customer_data],
+        ignore_index=True
+    )
+
+    encoded_data = pd.get_dummies(
+        combined_data,
+        drop_first=True
+    )
+
+    customer_encoded = encoded_data.iloc[
+        len(base_features):
+    ].copy()
+
+    customer_encoded = customer_encoded.reindex(
+        columns=feature_columns,
+        fill_value=0
+    )
+
+    customer_encoded = customer_encoded.astype(float)
+
+    available_numeric = [
+        col for col in NUMERIC_COLUMNS
+        if col in customer_encoded.columns
+    ]
+
+    if len(available_numeric) != len(NUMERIC_COLUMNS):
+        raise ValueError(
+            "The saved feature columns do not contain all "
+            "required numerical columns."
+        )
+
+    customer_encoded.loc[:, available_numeric] = (
+        scaler.transform(
+            customer_encoded[available_numeric]
+        )
+    )
+
+    return customer_encoded
+
+
+# ============================================================
+# PREDICTION FUNCTION
+# ============================================================
+
+def predict_churn(model, input_data):
+
+    predictions = model.predict(
+        input_data,
+        verbose=0
+    )
+
+    probabilities = np.asarray(predictions).reshape(-1)
+
+    return probabilities
+
+
+# ============================================================
+# LOAD PROJECT FILES
+# ============================================================
+
+try:
+
+    model, scaler, feature_columns = (
+        load_model_and_preprocessing()
+    )
+
+    original_data = load_dataset()
+
+    if original_data is None:
+        st.error(
+            "Dataset not found. Place your Telco Customer "
+            "Churn CSV file inside the dataset folder."
+        )
+        st.stop()
+
+except Exception as error:
+
+    st.error(f"Unable to load project files: {error}")
+    st.stop()
+
+
+# ============================================================
+# INDIVIDUAL CUSTOMER PREDICTION
+# ============================================================
+
+st.header("Individual Customer Prediction")
+
+with st.form("individual_prediction_form"):
+
+    st.subheader("Personal Information")
+
+    col1, col2 = st.columns(2)
 
     with col1:
 
         gender = st.selectbox(
             "Gender",
-            ["Female", "Male"]
+            ["Male", "Female"],
+            index=None,
+            placeholder="Select an option"
         )
 
-    with col2:
-
-        senior = st.selectbox(
+        senior_citizen = st.selectbox(
             "Senior Citizen",
-            [0, 1],
-            format_func=lambda x: "Yes" if x == 1 else "No"
+            ["Yes", "No"],
+            index=None,
+            placeholder="Select an option"
         )
-
-    with col3:
 
         partner = st.selectbox(
-            "Has Partner?",
-            ["Yes", "No"]
-        )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        dependents = st.selectbox(
-            "Has Dependents?",
-            ["Yes", "No"]
+            "Partner",
+            ["Yes", "No"],
+            index=None,
+            placeholder="Select an option"
         )
 
     with col2:
+
+        dependents = st.selectbox(
+            "Dependents",
+            ["Yes", "No"],
+            index=None,
+            placeholder="Select an option"
+        )
 
         tenure = st.number_input(
             "Tenure (Months)",
             min_value=0,
-            max_value=72,
-            value=12,
-            step=1
+            max_value=100,
+            value=None,
+            step=1,
+            placeholder="Enter tenure"
         )
 
     st.divider()
 
-    # =================================================
-    # SERVICE INFORMATION
-    # =================================================
-
-    st.header("📞 Services Information")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        phone = st.selectbox(
-            "Phone Service",
-            ["Yes", "No"]
-        )
-
-    with col2:
-
-        multiple_lines = st.selectbox(
-            "Multiple Lines",
-            ["No phone service", "No", "Yes"]
-        )
-
-    with col3:
-
-        internet = st.selectbox(
-            "Internet Service",
-            ["DSL", "Fiber optic", "No"]
-        )
-
-    internet_options = [
-        "No internet service",
-        "No",
-        "Yes"
-    ]
+    st.subheader("Services Information")
 
     col1, col2 = st.columns(2)
 
     with col1:
 
+        phone_service = st.selectbox(
+            "Phone Service",
+            ["Yes", "No"],
+            index=None,
+            placeholder="Select an option"
+        )
+
+        multiple_lines = st.selectbox(
+            "Multiple Lines",
+            ["Yes", "No", "No phone service"],
+            index=None,
+            placeholder="Select an option"
+        )
+
+        internet_service = st.selectbox(
+            "Internet Service",
+            ["DSL", "Fiber optic", "No"],
+            index=None,
+            placeholder="Select an option"
+        )
+
         online_security = st.selectbox(
             "Online Security",
-            internet_options
+            ["Yes", "No", "No internet service"],
+            index=None,
+            placeholder="Select an option"
         )
 
         online_backup = st.selectbox(
             "Online Backup",
-            internet_options
+            ["Yes", "No", "No internet service"],
+            index=None,
+            placeholder="Select an option"
         )
 
         device_protection = st.selectbox(
             "Device Protection",
-            internet_options
+            ["Yes", "No", "No internet service"],
+            index=None,
+            placeholder="Select an option"
         )
 
     with col2:
 
         tech_support = st.selectbox(
             "Tech Support",
-            internet_options
+            ["Yes", "No", "No internet service"],
+            index=None,
+            placeholder="Select an option"
         )
 
         streaming_tv = st.selectbox(
             "Streaming TV",
-            internet_options
+            ["Yes", "No", "No internet service"],
+            index=None,
+            placeholder="Select an option"
         )
 
         streaming_movies = st.selectbox(
             "Streaming Movies",
-            internet_options
+            ["Yes", "No", "No internet service"],
+            index=None,
+            placeholder="Select an option"
         )
 
     st.divider()
 
-    # =================================================
-    # BILLING INFORMATION
-    # =================================================
+    st.subheader("Billing Information")
 
-    st.header("💳 Billing Information")
+    if LIVE_RATE_AVAILABLE:
 
-    col1, col2, col3 = st.columns(3)
+        st.caption(
+            f"Exchange Rate: 1 USD = ₹{USD_INR_RATE:,.2f} INR"
+        )
+
+    else:
+
+        st.caption(
+            f"Exchange Rate: 1 USD = ₹{USD_INR_RATE:,.2f} INR "
+            "(fallback rate; live rate unavailable)"
+        )
+
+    col1, col2 = st.columns(2)
 
     with col1:
 
         contract = st.selectbox(
             "Contract",
-            ["Month-to-month", "One year", "Two year"]
+            [
+                "Month-to-month",
+                "One year",
+                "Two year"
+            ],
+            index=None,
+            placeholder="Select an option"
+        )
+
+        paperless_billing = st.selectbox(
+            "Paperless Billing",
+            ["Yes", "No"],
+            index=None,
+            placeholder="Select an option"
         )
 
     with col2:
 
-        paperless = st.selectbox(
-            "Paperless Billing",
-            ["Yes", "No"]
-        )
-
-    with col3:
-
-        payment = st.selectbox(
+        payment_method = st.selectbox(
             "Payment Method",
             [
                 "Electronic check",
                 "Mailed check",
                 "Bank transfer (automatic)",
                 "Credit card (automatic)"
-            ]
+            ],
+            index=None,
+            placeholder="Select an option"
         )
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        monthly_charges = st.number_input(
-            "Monthly Charges ($)",
+        monthly_charges_inr = st.number_input(
+            "Monthly Charges (₹)",
             min_value=0.0,
-            value=70.0,
-            step=1.0
+            value=None,
+            step=10.0,
+            placeholder="Enter monthly charges in INR"
         )
-
-    # AUTOMATIC TOTAL CHARGES CALCULATION
-
-    total_charges = monthly_charges * tenure
-
-    with col2:
-
-        st.metric(
-            "Calculated Total Charges",
-            f"${total_charges:.2f}"
-        )
-
-        st.caption(
-            "Calculated using Monthly Charges × Tenure"
-        )
-
-    st.divider()
 
     submitted = st.form_submit_button(
-        "🔍 Predict Churn",
+        "Predict Churn",
         use_container_width=True
     )
 
 
-# =====================================================
-# 5. PREDICTION
-# =====================================================
+# ============================================================
+# INDIVIDUAL PREDICTION PROCESSING
+# ============================================================
 
 if submitted:
 
-    # Collect customer information
-
-    customer = {
-
-        "gender": gender,
-
-        "SeniorCitizen": senior,
-
+    required_inputs = {
+        "Gender": gender,
+        "Senior Citizen": senior_citizen,
         "Partner": partner,
-
         "Dependents": dependents,
-
-        "tenure": tenure,
-
-        "PhoneService": phone,
-
-        "MultipleLines": multiple_lines,
-
-        "InternetService": internet,
-
-        "OnlineSecurity": online_security,
-
-        "OnlineBackup": online_backup,
-
-        "DeviceProtection": device_protection,
-
-        "TechSupport": tech_support,
-
-        "StreamingTV": streaming_tv,
-
-        "StreamingMovies": streaming_movies,
-
+        "Tenure": tenure,
+        "Phone Service": phone_service,
+        "Multiple Lines": multiple_lines,
+        "Internet Service": internet_service,
+        "Online Security": online_security,
+        "Online Backup": online_backup,
+        "Device Protection": device_protection,
+        "Tech Support": tech_support,
+        "Streaming TV": streaming_tv,
+        "Streaming Movies": streaming_movies,
         "Contract": contract,
-
-        "PaperlessBilling": paperless,
-
-        "PaymentMethod": payment,
-
-        "MonthlyCharges": monthly_charges,
-
-        "TotalCharges": total_charges
-
+        "Paperless Billing": paperless_billing,
+        "Payment Method": payment_method,
+        "Monthly Charges": monthly_charges_inr
     }
 
-    customer_df = pd.DataFrame([customer])
-
-    # =================================================
-    # 6. DATA PREPROCESSING
-    # =================================================
-
-    combined = pd.concat(
-        [original_data, customer_df],
-        ignore_index=True
-    )
-
-    combined_encoded = pd.get_dummies(
-        combined,
-        drop_first=True,
-        dtype=int
-    )
-
-    X_customer = combined_encoded.iloc[[-1]]
-
-    # Match training feature columns
-
-    X_customer = X_customer.reindex(
-        columns=feature_columns,
-        fill_value=0
-    )
-
-    # Scale numerical columns
-
-    numerical_columns = [
-        "tenure",
-        "MonthlyCharges",
-        "TotalCharges"
+    missing_fields = [
+        field for field, value in required_inputs.items()
+        if value is None
     ]
 
-    X_customer[numerical_columns] = scaler.transform(
-        X_customer[numerical_columns]
-    )
-
-    X_customer = X_customer.astype("float32")
-
-    # =================================================
-    # 7. NEURAL NETWORK PREDICTION
-    # =================================================
-
-    prediction = model.predict(
-        X_customer,
-        verbose=0
-    )
-
-    churn_probability = float(prediction[0][0])
-
-    stay_probability = 1 - churn_probability
-
-    # =================================================
-    # 8. DISPLAY PREDICTION RESULT
-    # =================================================
-
-    st.divider()
-
-    st.header("📈 Prediction Results")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.metric(
-            "Churn Probability",
-            f"{churn_probability * 100:.2f}%"
-        )
-
-    with col2:
-
-        st.metric(
-            "Stay Probability",
-            f"{stay_probability * 100:.2f}%"
-        )
-
-    if churn_probability >= 0.5:
+    if missing_fields:
 
         st.error(
-            "⚠️ CUSTOMER LIKELY TO CHURN"
+            "Please complete all required fields: "
+            + ", ".join(missing_fields)
         )
 
-        st.write(
-            "The model predicts a higher likelihood "
-            "that this customer will leave the company."
-        )
+    elif monthly_charges_inr <= 0:
+
+        st.error("Monthly charges must be greater than zero.")
+
+    elif tenure <= 0:
+
+        st.error("Tenure must be greater than zero months.")
 
     else:
 
-        st.success(
-            "✅ CUSTOMER LIKELY TO STAY"
-        )
+        try:
 
-        st.write(
-            "The model predicts a higher likelihood "
-            "that this customer will remain with the company."
-        )
-
-    # =================================================
-    # 9. CHURN PROBABILITY CHART
-    # =================================================
-
-    st.subheader("Churn Probability Visualization")
-
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=[
-                    "Churn Risk",
-                    "Stay Probability"
-                ],
-
-                values=[
-                    churn_probability * 100,
-                    stay_probability * 100
-                ],
-
-                hole=0.55,
-
-                textinfo="label+percent"
-            )
-        ]
-    )
-
-    fig.update_layout(
-        height=400,
-        title="Customer Churn Analysis"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    # =================================================
-    # 10. CUSTOMER RETENTION RECOMMENDATIONS
-    # =================================================
-
-    st.subheader(
-        "💡 Customer Retention Recommendations"
-    )
-
-    recommendations = []
-
-    if churn_probability >= 0.5:
-
-        if contract == "Month-to-month":
-
-            recommendations.append(
-                "Offer a suitable long-term contract plan."
+            total_charges_inr = (
+                monthly_charges_inr * tenure
             )
 
-        if payment == "Electronic check":
-
-            recommendations.append(
-                "Offer automatic payment options."
+            monthly_charges_usd = inr_to_usd(
+                monthly_charges_inr
             )
 
-        if tech_support == "No":
-
-            recommendations.append(
-                "Consider offering technical support services."
+            total_charges_usd = inr_to_usd(
+                total_charges_inr
             )
 
-        if online_security == "No":
+            customer = pd.DataFrame([{
 
-            recommendations.append(
-                "Introduce online security packages."
+                "gender": gender,
+
+                "SeniorCitizen": (
+                    1 if senior_citizen == "Yes" else 0
+                ),
+
+                "Partner": partner,
+                "Dependents": dependents,
+
+                "tenure": int(tenure),
+
+                "PhoneService": phone_service,
+                "MultipleLines": multiple_lines,
+                "InternetService": internet_service,
+                "OnlineSecurity": online_security,
+                "OnlineBackup": online_backup,
+                "DeviceProtection": device_protection,
+                "TechSupport": tech_support,
+                "StreamingTV": streaming_tv,
+                "StreamingMovies": streaming_movies,
+
+                "Contract": contract,
+                "PaperlessBilling": paperless_billing,
+                "PaymentMethod": payment_method,
+
+                "MonthlyCharges": monthly_charges_usd,
+                "TotalCharges": total_charges_usd
+
+            }])
+
+            processed_customer = prepare_model_input(
+                customer,
+                original_data,
+                scaler,
+                feature_columns
             )
 
-        if tenure <= 12:
+            probability = predict_churn(
+                model,
+                processed_customer
+            )[0]
 
-            recommendations.append(
-                "Provide onboarding assistance and loyalty benefits."
+            churn_percentage = probability * 100
+
+            st.divider()
+
+            st.header("Prediction Results")
+
+            result_col1, result_col2 = st.columns(2)
+
+            with result_col1:
+
+                st.metric(
+                    "Churn Probability",
+                    f"{churn_percentage:.2f}%"
+                )
+
+            with result_col2:
+
+                st.metric(
+                    "Prediction",
+                    "Likely to Churn"
+                    if probability >= 0.5
+                    else "Likely to Stay"
+                )
+
+            probability_chart = pd.DataFrame({
+                "Status": ["Churn Probability", "Stay Probability"],
+                "Probability": [
+                    probability * 100,
+                    (1 - probability) * 100
+                ]
+            })
+
+            fig = px.bar(
+                probability_chart,
+                x="Status",
+                y="Probability",
+                title="Customer Prediction Probability",
+                range_y=[0, 100],
+                text_auto=".2f"
             )
 
-        if monthly_charges > 80:
-
-            recommendations.append(
-                "Review pricing and offer suitable plans."
+            st.plotly_chart(
+                fig,
+                use_container_width=True
             )
 
-        if not recommendations:
+            st.subheader("Customer Retention Recommendations")
 
-            recommendations.append(
-                "Offer personalized support and customer satisfaction reviews."
+            if probability >= 0.5:
+
+                st.warning(
+                    "This customer has been classified as likely to churn."
+                )
+
+                st.write(
+                    "- Offer suitable retention benefits."
+                )
+
+                st.write(
+                    "- Review the customer's current service plan."
+                )
+
+                st.write(
+                    "- Provide timely customer support."
+                )
+
+                st.write(
+                    "- Consider a suitable contract renewal offer."
+                )
+
+            else:
+
+                st.success(
+                    "This customer has been classified as likely to stay."
+                )
+
+                st.write(
+                    "- Continue providing reliable service."
+                )
+
+                st.write(
+                    "- Maintain customer satisfaction."
+                )
+
+                st.write(
+                    "- Offer relevant upgrades when appropriate."
+                )
+
+            st.subheader("Customer Billing Summary")
+
+            bill_col1, bill_col2 = st.columns(2)
+
+            bill_col1.metric(
+                "Monthly Charges",
+                f"₹{monthly_charges_inr:,.2f}"
             )
 
-        for item in recommendations:
+            bill_col2.metric(
+                "Estimated Total Charges",
+                f"₹{total_charges_inr:,.2f}"
+            )
 
-            st.write("👉", item)
+        except Exception as error:
 
-    else:
+            st.error(
+                f"Prediction could not be completed: {error}"
+            )
 
-        st.success(
-            "Customer retention risk is relatively low. "
-            "Continue providing quality service and regular support."
-        )
-
-    # =================================================
-    # 11. CUSTOMER BILLING SUMMARY
-    # =================================================
-
-    st.subheader("💰 Customer Billing Summary")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.metric(
-            "Tenure",
-            f"{tenure} Months"
-        )
-
-    with col2:
-
-        st.metric(
-            "Monthly Charges",
-            f"${monthly_charges:.2f}"
-        )
-
-    with col3:
-
-        st.metric(
-            "Total Charges",
-            f"${total_charges:.2f}"
-        )
-
-    st.divider()
-
-    st.caption(
-        "This prediction is an estimate generated by "
-        "a trained Deep Neural Network. It should be "
-        "used as decision-support information."
-    )
 
 # ============================================================
-# BULK CUSTOMER CHURN PREDICTION
+# BULK CUSTOMER PREDICTION
 # ============================================================
 
-st.header("Bulk Customer Churn Prediction")
+st.divider()
+
+st.header("Bulk Customer Prediction")
 
 st.write(
-    "Upload a CSV file containing multiple customer records "
-    "to predict churn for all customers at once."
+    "Upload a CSV file containing customer information. "
+    "MonthlyCharges and TotalCharges must be entered in INR."
 )
 
 uploaded_file = st.file_uploader(
-    "Upload Customer CSV",
-    type=["csv"],
-    key="bulk_customer_csv"
+    "Upload Customer CSV File",
+    type=["csv"]
 )
+
 
 if uploaded_file is not None:
 
     try:
+
         bulk_data = pd.read_csv(uploaded_file)
 
         st.subheader("Uploaded Customer Data")
-        st.dataframe(bulk_data.head())
 
-        # Keep customer IDs for the final results
-        if "customerID" in bulk_data.columns:
-            customer_ids = bulk_data["customerID"].astype(str)
-        else:
-            customer_ids = pd.Series(
-                [f"Customer_{i+1}" for i in range(len(bulk_data))]
-            )
-
-        # Remove columns that are not model inputs
-        bulk_data = bulk_data.drop(
-            columns=["customerID", "Churn"],
-            errors="ignore"
+        st.dataframe(
+            bulk_data.head(),
+            use_container_width=True
         )
 
-        # Required input columns
-        required_columns = [
-            "gender", "SeniorCitizen", "Partner", "Dependents",
-            "tenure", "PhoneService", "MultipleLines",
-            "InternetService", "OnlineSecurity", "OnlineBackup",
-            "DeviceProtection", "TechSupport", "StreamingTV",
-            "StreamingMovies", "Contract", "PaperlessBilling",
-            "PaymentMethod", "MonthlyCharges", "TotalCharges"
-        ]
-
         missing_columns = [
-            col for col in required_columns
-            if col not in bulk_data.columns
+            column for column in REQUIRED_COLUMNS
+            if column not in bulk_data.columns
         ]
 
         if missing_columns:
+
             st.error(
-                "Missing columns: " + ", ".join(missing_columns)
+                "Missing required columns: "
+                + ", ".join(missing_columns)
             )
 
         else:
 
-            if st.button("Predict All Customers"):
+            if st.button(
+                "Predict Churn for All Customers",
+                use_container_width=True
+            ):
 
-                with st.spinner("Predicting customer churn..."):
+                bulk_customer = bulk_data[
+                    REQUIRED_COLUMNS
+                ].copy()
 
-                    # Convert TotalCharges to numeric
-                    bulk_data["TotalCharges"] = pd.to_numeric(
-                        bulk_data["TotalCharges"],
+                for column in NUMERIC_COLUMNS:
+
+                    bulk_customer[column] = pd.to_numeric(
+                        bulk_customer[column],
                         errors="coerce"
-                    ).fillna(0)
-
-                    # Clean the training reference data
-                    reference_data = original_data.copy()
-
-                    reference_data = reference_data.drop(
-                        columns=["customerID", "Churn"],
-                        errors="ignore"
                     )
 
-                    reference_data["TotalCharges"] = pd.to_numeric(
-                        reference_data["TotalCharges"],
-                        errors="coerce"
-                    ).fillna(0)
+                if bulk_customer.isnull().any().any():
 
-                    # Combine reference data and uploaded customers
-                    combined_data = pd.concat(
-                        [reference_data, bulk_data],
-                        ignore_index=True
+                    st.error(
+                        "The CSV contains missing or invalid values. "
+                        "Check the numerical columns."
                     )
 
-                    # Apply the same one-hot encoding
-                    combined_encoded = pd.get_dummies(
-                        combined_data,
-                        drop_first=True,
-                        dtype=int
+                elif (
+                    (bulk_customer["tenure"] <= 0).any()
+                    or (bulk_customer["MonthlyCharges"] <= 0).any()
+                    or (bulk_customer["TotalCharges"] < 0).any()
+                ):
+
+                    st.error(
+                        "Tenure and MonthlyCharges must be greater "
+                        "than zero, and TotalCharges cannot be negative."
                     )
 
-                    # Keep only the features used during training
-                    combined_encoded = combined_encoded.reindex(
-                        columns=feature_columns,
-                        fill_value=0
-                    )
+                else:
 
-                    # Select only the uploaded customer rows
-                    X_bulk = combined_encoded.iloc[
-                        len(reference_data):
-                    ].copy()
+                    try:
 
-                    # Scale numerical columns
-                    numeric_columns = [
-                        "tenure",
-                        "MonthlyCharges",
-                        "TotalCharges"
-                    ]
+                        senior_values = (
+                            bulk_customer["SeniorCitizen"]
+                            .astype(str)
+                            .str.strip()
+                            .str.lower()
+                        )
 
-                    X_bulk[numeric_columns] = scaler.transform(
-                        X_bulk[numeric_columns]
-                    )
+                        senior_mapping = {
+                            "yes": 1,
+                            "no": 0,
+                            "1": 1,
+                            "0": 0
+                        }
 
-                    X_bulk = X_bulk.astype("float32")
+                        converted_senior = senior_values.map(
+                            senior_mapping
+                        )
 
-                    # Predict all customers together
-                    probabilities = model.predict(
-                        X_bulk,
-                        verbose=0
-                    ).flatten()
+                        if converted_senior.isnull().any():
 
-                    # Create results
-                    results = pd.DataFrame({
-                        "Customer ID": customer_ids.values,
-                        "Churn Probability": probabilities * 100,
-                        "Prediction": [
-                            "Likely to Churn"
-                            if p >= 0.5
-                            else "Likely to Stay"
-                            for p in probabilities
-                        ]
-                    })
+                            st.error(
+                                "SeniorCitizen must contain Yes/No "
+                                "or 1/0 values."
+                            )
 
-                    # Display summary
-                    total_customers = len(results)
-                    churn_count = (
-                        results["Prediction"] == "Likely to Churn"
-                    ).sum()
-                    stay_count = total_customers - churn_count
+                            st.stop()
 
-                    st.success("Bulk prediction completed!")
+                        bulk_customer["SeniorCitizen"] = (
+                            converted_senior.astype(int)
+                        )
 
-                    col1, col2, col3 = st.columns(3)
+                        bulk_customer["MonthlyCharges"] = (
+                            bulk_customer["MonthlyCharges"]
+                            / USD_INR_RATE
+                        )
 
-                    col1.metric(
-                        "Total Customers",
-                        total_customers
-                    )
+                        bulk_customer["TotalCharges"] = (
+                            bulk_customer["TotalCharges"]
+                            / USD_INR_RATE
+                        )
 
-                    col2.metric(
-                        "Likely to Churn",
-                        int(churn_count)
-                    )
+                        processed_bulk = prepare_model_input(
+                            bulk_customer,
+                            original_data,
+                            scaler,
+                            feature_columns
+                        )
 
-                    col3.metric(
-                        "Likely to Stay",
-                        int(stay_count)
-                    )
+                        probabilities = predict_churn(
+                            model,
+                            processed_bulk
+                        )
 
-                    # Display prediction table
-                    st.subheader("Prediction Results")
+                        results = bulk_data.copy()
 
-                    results["Churn Probability"] = (
-                        results["Churn Probability"].round(2)
-                    )
+                        results["Churn Probability (%)"] = (
+                            probabilities * 100
+                        ).round(2)
 
-                    st.dataframe(
-                        results,
-                        use_container_width=True
-                    )
+                        results["Prediction"] = np.where(
+                            probabilities >= 0.5,
+                            "Likely to Churn",
+                            "Likely to Stay"
+                        )
 
-                    # Download results
-                    csv_data = results.to_csv(index=False).encode("utf-8")
+                        st.divider()
 
-                    st.download_button(
-                        label="Download Prediction Results",
-                        data=csv_data,
-                        file_name="bulk_churn_predictions.csv",
-                        mime="text/csv"
-                    )
+                        st.subheader(
+                            "Bulk Prediction Results"
+                        )
 
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
+                        st.dataframe(
+                            results,
+                            use_container_width=True
+                        )
+
+                        likely_to_churn = int(
+                            (probabilities >= 0.5).sum()
+                        )
+
+                        likely_to_stay = int(
+                            (probabilities < 0.5).sum()
+                        )
+
+                        summary_col1, summary_col2, summary_col3 = (
+                            st.columns(3)
+                        )
+
+                        summary_col1.metric(
+                            "Total Customers",
+                            len(results)
+                        )
+
+                        summary_col2.metric(
+                            "Likely to Churn",
+                            likely_to_churn
+                        )
+
+                        summary_col3.metric(
+                            "Likely to Stay",
+                            likely_to_stay
+                        )
+
+                        chart_data = pd.DataFrame({
+                            "Prediction": [
+                                "Likely to Churn",
+                                "Likely to Stay"
+                            ],
+                            "Customers": [
+                                likely_to_churn,
+                                likely_to_stay
+                            ]
+                        })
+
+                        fig = px.bar(
+                            chart_data,
+                            x="Prediction",
+                            y="Customers",
+                            title="Bulk Customer Prediction Summary",
+                            text="Customers"
+                        )
+
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True
+                        )
+
+                        csv_data = results.to_csv(
+                            index=False
+                        ).encode("utf-8")
+
+                        st.download_button(
+                            label="Download Prediction Results CSV",
+                            data=csv_data,
+                            file_name="customer_churn_predictions.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+
+                    except Exception as error:
+
+                        st.error(
+                            f"Bulk prediction failed: {error}"
+                        )
+
+    except Exception as error:
+
+        st.error(
+            f"Unable to read the uploaded CSV file: {error}"
+        )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Customer Churn Prediction System"
+)
